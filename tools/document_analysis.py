@@ -21,7 +21,11 @@ CLAUSE_RULES: tuple[ClauseRule, ...] = (
         "This clause may renew the agreement unless you cancel before the stated deadline.",
         "medium",
         re.compile(
-            r"\b(?:auto(?:matic(?:ally)?)?[-\s]?renewal|automatically\s+(?:renew|extend))\b",
+            r"\b(?:"
+            r"auto(?:matic(?:ally)?)?[-\s]?renewal|"
+            r"automatically\s+(?:renew|renews|extend|extends)|"
+            r"(?:renew|renews|extend|extends)\s+automatically"
+            r")\b",
             re.IGNORECASE,
         ),
     ),

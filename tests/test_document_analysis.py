@@ -32,6 +32,17 @@ class AnalyzeDocumentTests(unittest.TestCase):
         self.assertEqual(result["key_items"][0]["severity"], "high")
         self.assertIn("early cancellation", result["key_items"][0]["source_text"].lower())
 
+    def test_detects_automatic_renewal_verb_forms(self) -> None:
+        for document in (
+            "This agreement automatically renews each year.",
+            "This agreement renews automatically each year.",
+        ):
+            with self.subTest(document=document):
+                result = analyze_document(document, "agreement")
+
+                self.assertEqual(len(result["key_items"]), 1)
+                self.assertEqual(result["key_items"][0]["category"], "auto_renewal")
+
     def test_returns_empty_result_for_empty_document(self) -> None:
         result = analyze_document("   ")
 
