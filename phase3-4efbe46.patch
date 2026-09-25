@@ -1,0 +1,235 @@
+From 4efbe46483dc9c0930803ceeeefe1fb51da1f72d Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 25 Sep 2026 05:32:28 +0000
+Subject: [PATCH] Add deterministic document analysis MCP tool
+
+---
+ README.md                       |   8 ++-
+ requirements.txt                |   2 +-
+ server.py                       |  12 ++++
+ tests/test_document_analysis.py |  51 ++++++++++++++++
+ tools/document_analysis.py      | 101 ++++++++++++++++++++++++++++++++
+ 5 files changed, 172 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test_document_analysis.py
+ create mode 100644 tools/document_analysis.py
+
+diff --git a/README.md b/README.md
+index 8ea2153..16a9c93 100644
+--- a/README.md
++++ b/README.md
+@@ -29,4 +29,10 @@ A minimal, self-hosted MCP server foundation for the Contract/Bill Clarity Agent
+    python server.py
+    ```
+ 
+-The initial server intentionally has no document-analysis tools yet.
++## Available MCP tool
++
++`analyze_document(document_text, document_type="document")` uses deterministic
++rules to identify early-cancellation, automatic-renewal, late-payment,
++security-deposit, and termination clauses. It returns the document type, a
++summary, and structured key items with source text and severity. It does not
++use Amazon Bedrock or any other LLM.
+diff --git a/requirements.txt b/requirements.txt
+index 4761224..773186d 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,3 +1,3 @@
+-mcp
++mcp<2
+ boto3
+ python-dotenv
+diff --git a/server.py b/server.py
+index 12ba2ee..99e7c17 100644
+--- a/server.py
++++ b/server.py
+@@ -2,11 +2,23 @@
+ 
+ from dotenv import load_dotenv
+ from mcp.server.fastmcp import FastMCP
++from tools.document_analysis import analyze_document as analyze_document_content
+ 
+ load_dotenv()
+ 
+ mcp = FastMCP("Contract/Bill Clarity Agent")
+ 
+ 
++@mcp.tool(
++    name="analyze_document",
++    description="Identify common contract and bill clauses using deterministic rules.",
++)
++def analyze_document(
++    document_text: str, document_type: str = "document"
++) -> dict[str, object]:
++    """Analyze text for common document clauses without using an LLM."""
++    return analyze_document_content(document_text, document_type)
++
++
+ if __name__ == "__main__":
+     mcp.run(transport="streamable-http")
+diff --git a/tests/test_document_analysis.py b/tests/test_document_analysis.py
+new file mode 100644
+index 0000000..e50a699
+--- /dev/null
++++ b/tests/test_document_analysis.py
+@@ -0,0 +1,51 @@
++"""Tests for deterministic document analysis."""
++
++import unittest
++
++from tools.document_analysis import analyze_document
++
++
++class AnalyzeDocumentTests(unittest.TestCase):
++    def test_detects_common_clauses(self) -> None:
++        document = (
++            "An early cancellation fee of $200 applies. "
++            "This lease will automatically renew each year. "
++            "A late payment fee applies after five days. "
++            "The security deposit will be returned after inspection. "
++            "Either party may terminate with 30 days' notice."
++        )
++
++        result = analyze_document(document, "lease")
++
++        self.assertEqual(result["document_type"], "lease")
++        self.assertEqual(len(result["key_items"]), 5)
++        self.assertEqual(
++            [item["category"] for item in result["key_items"]],
++            [
++                "early_cancellation",
++                "auto_renewal",
++                "late_payment",
++                "security_deposit",
++                "termination",
++            ],
++        )
++        self.assertEqual(result["key_items"][0]["severity"], "high")
++        self.assertIn("early cancellation", result["key_items"][0]["source_text"].lower())
++
++    def test_returns_empty_result_for_empty_document(self) -> None:
++        result = analyze_document("   ")
++
++        self.assertEqual(result["document_type"], "document")
++        self.assertEqual(result["summary"], "No document text was provided.")
++        self.assertEqual(result["key_items"], [])
++
++    def test_returns_empty_result_when_no_clause_is_recognized(self) -> None:
++        result = analyze_document("The office is open Monday through Friday.", "notice")
++
++        self.assertEqual(result["document_type"], "notice")
++        self.assertEqual(result["summary"], "No recognized clauses were found in this notice.")
++        self.assertEqual(result["key_items"], [])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/document_analysis.py b/tools/document_analysis.py
+new file mode 100644
+index 0000000..47faaf9
+--- /dev/null
++++ b/tools/document_analysis.py
+@@ -0,0 +1,101 @@
++"""Deterministic document-clause analysis used by the MCP tool."""
++
++from __future__ import annotations
++
++import re
++
++
++ClauseRule = tuple[str, str, str, str, re.Pattern[str]]
++
++CLAUSE_RULES: tuple[ClauseRule, ...] = (
++    (
++        "early_cancellation",
++        "Early cancellation",
++        "This clause may require payment or impose other consequences for ending the agreement early.",
++        "high",
++        re.compile(r"\bearly\s+(?:cancellation|termination)\b", re.IGNORECASE),
++    ),
++    (
++        "auto_renewal",
++        "Automatic renewal",
++        "This clause may renew the agreement unless you cancel before the stated deadline.",
++        "medium",
++        re.compile(
++            r"\b(?:auto(?:matic(?:ally)?)?[-\s]?renewal|automatically\s+(?:renew|extend))\b",
++            re.IGNORECASE,
++        ),
++    ),
++    (
++        "late_payment",
++        "Late payment",
++        "This clause may add a fee, interest, or other consequence when payment is late.",
++        "medium",
++        re.compile(r"\b(?:late\s+(?:payment|fee)|overdue\s+payment)\b", re.IGNORECASE),
++    ),
++    (
++        "security_deposit",
++        "Security deposit",
++        "This clause describes money held to cover damage, unpaid amounts, or other obligations.",
++        "medium",
++        re.compile(r"\bsecurity\s+deposit\b", re.IGNORECASE),
++    ),
++    (
++        "termination",
++        "Termination",
++        "This clause describes how or when the agreement can end.",
++        "high",
++        re.compile(r"\b(?:termination|terminate|notice\s+to\s+terminate)\b", re.IGNORECASE),
++    ),
++)
++
++
++def analyze_document(document_text: str, document_type: str = "document") -> dict[str, object]:
++    """Return recognized clause information for a document's plain text."""
++    normalized_type = document_type.strip() or "document"
++    text = document_text.strip()
++
++    if not text:
++        return {
++            "document_type": normalized_type,
++            "summary": "No document text was provided.",
++            "key_items": [],
++        }
++
++    source_segments = _split_source_segments(text)
++    key_items = [_build_key_item(rule, source_segments) for rule in CLAUSE_RULES]
++    recognized_items = [item for item in key_items if item is not None]
++
++    if not recognized_items:
++        summary = f"No recognized clauses were found in this {normalized_type}."
++    else:
++        summary = (
++            f"Found {len(recognized_items)} recognized clause(s) in this {normalized_type}."
++        )
++
++    return {
++        "document_type": normalized_type,
++        "summary": summary,
++        "key_items": recognized_items,
++    }
++
++
++def _split_source_segments(text: str) -> list[str]:
++    return [segment.strip() for segment in re.split(r"(?<=[.!?])\s+|\n+", text) if segment.strip()]
++
++
++def _build_key_item(
++    rule: ClauseRule, source_segments: list[str]
++) -> dict[str, str] | None:
++    category, title, explanation, severity, pattern = rule
++    source_text = next((segment for segment in source_segments if pattern.search(segment)), None)
++
++    if source_text is None:
++        return None
++
++    return {
++        "category": category,
++        "title": title,
++        "explanation": explanation,
++        "severity": severity,
++        "source_text": source_text,
++    }
+-- 
+2.43.0
+
